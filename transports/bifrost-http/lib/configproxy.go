@@ -67,8 +67,8 @@ func validateGlobalProxyConfig(c configstoreTables.GlobalProxyConfig) error {
 		return nil
 	}
 	switch c.Type {
-	case network.GlobalProxyTypeHTTP:
-	case network.GlobalProxyTypeSOCKS5, network.GlobalProxyTypeTCP:
+	case network.GlobalProxyTypeHTTP, network.GlobalProxyTypeSOCKS5:
+	case network.GlobalProxyTypeTCP:
 		return fmt.Errorf("proxy type %s is not yet supported", c.Type)
 	default:
 		return fmt.Errorf("invalid proxy type: %s", c.Type)

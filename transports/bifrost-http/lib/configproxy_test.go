@@ -65,6 +65,25 @@ func TestLoadProxyConfig_AppliesTheDeclaration(t *testing.T) {
 	assert.Equal(t, "http://proxy.corp:8080", inMemory.URL)
 }
 
+// TestLoadProxyConfig_AppliesASOCKS5Declaration: the file can declare a SOCKS5 proxy, as the
+// settings endpoint can, and it is stored with its type.
+func TestLoadProxyConfig_AppliesASOCKS5Declaration(t *testing.T) {
+	initTestLogger()
+	tempDir := createTempDir(t)
+	configData := makeConfigDataWithProvidersAndDir(nil, tempDir)
+	declared := proxyFileConfig("socks5://proxy.corp:1080")
+	declared.Type = network.GlobalProxyTypeSOCKS5
+	configData.ProxyConfig = declared
+	createConfigFile(t, tempDir, configData)
+
+	stored, inMemory := bootProxy(t, tempDir, nil)
+	require.NotNil(t, stored, "an enabled socks5 declaration must be applied")
+	assert.Equal(t, network.GlobalProxyTypeSOCKS5, stored.Type)
+	assert.Equal(t, "socks5://proxy.corp:1080", stored.URL)
+	require.NotNil(t, inMemory)
+	assert.Equal(t, network.GlobalProxyTypeSOCKS5, inMemory.Type)
+}
+
 // TestLoadProxyConfig_SplitKeepsADashboardEditUntilTheFileChanges: the hash lives in its own row, so
 // a dashboard save does not wipe it, and an unchanged file leaves the edit alone.
 func TestLoadProxyConfig_SplitKeepsADashboardEditUntilTheFileChanges(t *testing.T) {
@@ -127,7 +146,7 @@ func TestLoadProxyConfig_AbsentOrInvalidLeavesTheStoredProxy(t *testing.T) {
 	stored, _ = bootProxy(t, tempDir, nil)
 	assert.Equal(t, "http://dashboard.corp:3128", stored.URL, "an enabled proxy without a url is not applied")
 
-	configData.ProxyConfig = &GlobalProxyFileConfig{Enabled: true, Type: network.GlobalProxyTypeSOCKS5, URL: schemas.NewSecretVar("socks5://p:1080")}
+	configData.ProxyConfig = &GlobalProxyFileConfig{Enabled: true, Type: network.GlobalProxyTypeTCP, URL: schemas.NewSecretVar("tcp://p:9000")}
 	createConfigFile(t, tempDir, configData)
 	stored, inMemory = bootProxy(t, tempDir, nil)
 	assert.Equal(t, "http://dashboard.corp:3128", stored.URL, "an unsupported type is not applied")
