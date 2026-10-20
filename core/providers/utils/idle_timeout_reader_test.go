@@ -854,3 +854,100 @@ func TestSetupStreamCancellation_DisarmedDeadlineStillHonoursCtx(t *testing.T) {
 		t.Fatal("ctx cancellation no longer closes the body after disarm")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// io.EOF after the body was closed under the reader (#8551)
+// ---------------------------------------------------------------------------
+
+// eofOnCloseBody blocks in Read until Close, then reports a clean io.EOF. net/http can
+// surface a body torn down mid-read this way instead of an error, so callers that treat
+// io.EOF as a normal end of stream would report a stalled stream as complete.
+type eofOnCloseBody struct {
+	closed chan struct{}
+	once   sync.Once
+}
+
+func newEOFOnCloseBody() *eofOnCloseBody { return &eofOnCloseBody{closed: make(chan struct{})} }
+
+func (b *eofOnCloseBody) Read([]byte) (int, error) {
+	<-b.closed
+	return 0, io.EOF
+}
+
+func (b *eofOnCloseBody) Close() error {
+	b.once.Do(func() { close(b.closed) })
+	return nil
+}
+
+func TestIdleTimeoutReader_EOFAfterTimerFiredIsIdleTimeout(t *testing.T) {
+	t.Parallel()
+	body := newEOFOnCloseBody()
+	wrapped, cleanup := NewIdleTimeoutReader(body, body, 50*time.Millisecond, nil)
+	defer cleanup()
+
+	_, err := wrapped.Read(make([]byte, 16))
+	if !errors.Is(err, ErrStreamIdleTimeout) {
+		t.Fatalf("expected ErrStreamIdleTimeout when the timer closed the body and Read saw EOF, got %v", err)
+	}
+}
+
+func TestIdleTimeoutReader_EOFAfterCancellationCloseIsStreamClosed(t *testing.T) {
+	t.Parallel()
+	ctx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
+	body := newEOFOnCloseBody()
+	wrapped, cleanup := NewIdleTimeoutReader(body, body, 10*time.Second, ctx)
+	defer cleanup()
+	stopCancellation := SetupStreamCancellation(ctx, body, nil)
+	defer stopCancellation()
+
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		ctx.Cancel()
+	}()
+
+	_, err := wrapped.Read(make([]byte, 16))
+	if !errors.Is(err, ErrStreamClosed) {
+		t.Fatalf("expected ErrStreamClosed when cancellation closed the body and Read saw EOF, got %v", err)
+	}
+}
+
+// dataThenEOFOnCloseBody delivers its last bytes together with the EOF that follows a close.
+type dataThenEOFOnCloseBody struct {
+	closed chan struct{}
+	once   sync.Once
+	served atomic.Bool
+}
+
+func newDataThenEOFOnCloseBody() *dataThenEOFOnCloseBody {
+	return &dataThenEOFOnCloseBody{closed: make(chan struct{})}
+}
+
+func (b *dataThenEOFOnCloseBody) Read(p []byte) (int, error) {
+	<-b.closed
+	if b.served.Swap(true) {
+		return 0, io.EOF
+	}
+	return copy(p, "tail"), io.EOF
+}
+
+func (b *dataThenEOFOnCloseBody) Close() error {
+	b.once.Do(func() { close(b.closed) })
+	return nil
+}
+
+func TestIdleTimeoutReader_BytesWithEOFAfterTimerFiredAreDelivered(t *testing.T) {
+	t.Parallel()
+	ctx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
+	body := newDataThenEOFOnCloseBody()
+	wrapped, cleanup := NewIdleTimeoutReader(body, body, 50*time.Millisecond, ctx)
+	defer cleanup()
+
+	buf := make([]byte, 16)
+	n, err := wrapped.Read(buf)
+	if n != len("tail") || string(buf[:n]) != "tail" || err != nil {
+		t.Fatalf("first Read should deliver the trailing bytes with no error, got n=%d (%q) err=%v", n, buf[:n], err)
+	}
+	if _, err := wrapped.Read(buf); !errors.Is(err, ErrStreamIdleTimeout) {
+		t.Fatalf("the next Read should report the idle timeout, got %v", err)
+	}
+}

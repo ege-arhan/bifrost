@@ -4097,8 +4097,16 @@ func (r *idleTimeoutReader) Read(p []byte) (n int, err error) {
 	if n > 0 {
 		r.timer.Reset(r.timeout)
 	}
-	if err != nil && err != io.EOF && r.fired.Load() {
-		return n, ErrStreamIdleTimeout
+	// Once the body has been closed under us, by this reader's idle timer or by
+	// SetupStreamCancellation (ctx cancel, first-token timeout), any error ends the
+	// stream as closed, io.EOF included: a body torn down mid-read can surface as a
+	// clean EOF, which callers would take for a normally completed stream.
+	if err != nil && (r.fired.Load() || r.connectionClosed()) {
+		if n > 0 && err == io.EOF {
+			// Deliver the bytes that arrived with the EOF; the next Read reports the close.
+			return n, nil
+		}
+		return n, r.closedReadError()
 	}
 	return n, err
 }
